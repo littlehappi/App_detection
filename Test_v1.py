@@ -10,6 +10,7 @@ from sklearn import metrics
 from sklearn.cluster import MiniBatchKMeans, KMeans
 from sklearn.metrics.pairwise import pairwise_distances_argmin
 from sklearn.cluster import DBSCAN, Birch, AgglomerativeClustering
+import lightgbm as lgb
 
 def onehot_encode(data, const_len=64):
     """ expand n to a vector v with length 256, v[n] = 1, v[other] = 0 """
@@ -97,17 +98,58 @@ def PU_estimater(X, y):
     print "Splitting dataset"
     print
     split=2*len(y)/3
-    X_train=X[:split]
-    y_train = y[:split]
+    X_train_pre=X[:split]
+    y_train_pre = y[:split]
+    pos_=np.where(y_train_pre == +1.)[0]
+    neg_pre=np.where(y_train_pre == -1.)[0]
+    np.random.shuffle(neg_pre)
+    try:
+        neg_sample=neg_pre[:5*len(pos_)]
+    except:
+        exsit(0)
+        print "length is wrong"
+    X_train_neg=X_train_pre[neg_sample]
+    y_train_neg=y_train_pre[neg_sample]
+    X_train_pos=X_train_pre[pos_]
+    y_train_pos=y_train_pre[pos_]
+
+    X_train=np.concatenate((X_train_pos,X_train_neg))
+    y_train=np.concatenate((y_train_pos,y_train_neg))
+    permut = np.random.permutation(len(y_train))
+    X_train = X_train[permut]
+    y_train = y_train[permut]
+
+
     X_test = X[split:]
     y_test = y[split:]
+
+    lgb_train = lgb.Dataset(X_train, y_train)
+    lgb_eval  = lgb.Dataset(X_test, y_test, reference=lgb_train)
+
+    params={
+        'task': 'train',
+        'boosting_type': 'gbdt',
+        'objective': 'binary',
+        'metric': {'12','auc'},
+        'num_leaves': 31,
+        'learning_rate': 0.05,
+        'feature_fraction': 0.9,
+        'bagging_fraction': 0.8,
+        'bagging_freq': 5
+    }
+    #train process
+    gbm = lgb.LGBMClassifier(objective='binary',
+                            num_leaves=31,
+                            learning_rate=0.05,
+                            n_estimators=20)
 
     pu_f1_scores = []
     reg_f1_scores = []
 
-    n_sacrifice_iter = range(100, 700, 200 )
+    n_sacrifice_iter = range(0, 1501, 500 )
     for n_sacrifice in n_sacrifice_iter:
-	print "Making ", n_sacrifice, " positive examples negtive."
+	    
+        print "Making ", n_sacrifice, " positive examples negtive."
         print
         y_train_pu = np.copy(y_train)
         pos = np.where(y_train == +1.)[0]
@@ -122,54 +164,57 @@ def PU_estimater(X, y):
         
         #Get f1 score with pu_learning
         print "PU learning in progress..."
+        #estimator = RandomForestClassifier(n_estimators=100,
+        #                                   criterion='gini', 
+        #                                   bootstrap=True,
+        #                                   n_jobs=1)
+        #pu_estimator = PUAdapter(estimator,hold_out_ratio=0.2)
+        pu_estimator = PUAdapter(gbm,hold_out_ratio=0.2)
+
+        pu_estimator.fit(X_train,y_train_pu)
+	    
+        y_pred = pu_estimator.predict(X_test)
+	
+        precision, recall, f1_score, _ = precision_recall_fscore_support(y_test, y_pred)
+        pu_f1_scores.append(f1_score[1])
+        print "PU-learning F1 score: ", f1_score[1]
+        print "PU-learning Precision: ", precision[1]
+        print "PU-learning Recall: ", recall[1]
+        print
+
+        if n_sacrifice>0:        
+            sac_test=X_train[sacrifice] 
+            sar_pred=pu_estimator.predict(sac_test)
+            ratio=float(len(np.where(sar_pred==+1.)[0]))/n_sacrifice
+            print "sacrifice positive samples are labeled as:",sar_pred
+            print "ratio of the correct labeled sacrifice pos_samples:",ratio
+            print	
+
+       
         estimator = RandomForestClassifier(n_estimators=100,
                                            criterion='gini', 
                                            bootstrap=True,
                                            n_jobs=1)
-       # estimator = SVC(C=10,
-        #            kernel='rbf',
-         #           gamma=0.4,
-          #          probability=True)
-   
-	pu_estimator = PUAdapter(estimator,hold_out_ratio=0.2)
-        pu_estimator.fit(X_train,y_train_pu)
-	y_pred = pu_estimator.predict(X_test)
-	
-        precision, recall, f1_score, _ = precision_recall_fscore_support(y_test, y_pred)
-        pu_f1_scores.append(f1_score[1])
-        print "F1 score: ", f1_score[1]
-        print "Precision: ", precision[1]
-        print "Recall: ", recall[1]
-        print
-	sac_test=X_train[sacrifice] 
-        sar_pred=pu_estimator.predict(sac_test)
-	ratio=float(len(np.where(sar_pred==+1.)[0]))/n_sacrifice
-	print "sacrifice positive samples are labeled as:",sar_pred
-	print "ratio of the correct labeled sacrifice pos_samples:",ratio
-	print
-       
-	estimator = RandomForestClassifier(n_estimators=100,
-                                           criterion='gini', 
-                                           bootstrap=True,
-                                           n_jobs=1)
-	estimator.fit(X_train, y_train_pu)
-	y_pred_re=estimator.predict(X_test)
+        estimator.fit(X_train, y_train_pu)
+        y_pred_re=estimator.predict(X_test)
         precision, recall, f1_score, _ = precision_recall_fscore_support(y_test, y_pred_re)
         pu_f1_scores.append(f1_score[1])
-        print "F1 score: ", f1_score[1]
-        print "Precision: ", precision[1]
-        print "Recall: ", recall[1]
+        print "Benchmark F1 score: ", f1_score[1]
+        print "Benchmark Precision: ", precision[1]
+        print "Benchmark Recall: ", recall[1]
         print
-	sac_test=X_train[sacrifice] 
-        sar_pred=estimator.predict(sac_test)
-	ratio=float(len(np.where(sar_pred==+1.)[0]))/n_sacrifice
-	print "sacrifice positive samples are labeled as:",sar_pred
-	print "ratio of the correct labeled sacrifice pos_samples:",ratio
-	print	
+
+        if n_sacrifice>0:        
+            sac_test=X_train[sacrifice] 
+            sar_pred=estimator.predict(sac_test)
+            ratio=float(len(np.where(sar_pred==+1.)[0]))/n_sacrifice
+            print "sacrifice positive samples are labeled as:",sar_pred
+            print "ratio of the correct labeled sacrifice pos_samples:",ratio
+            print	
 
 
 def Clustering_map(X, y):
-    # random rank the data
+    # random: rank the data
     permut = np.random.permutation(len(y))
     X = X[permut]
     y = y[permut]
@@ -184,7 +229,7 @@ def Clustering_map(X, y):
     pu_f1_scores = []
     reg_f1_scores = []
 
-    n_sacrifice_iter = range(500, 600, 100 )
+    n_sacrifice_iter = range(200, 600, 100 )
     for n_sacrifice in n_sacrifice_iter:
 	print "number of the labeled data ", n_sacrifice, " to map clusters."
         print
@@ -265,7 +310,7 @@ def main():
         sys.exit(0)
     # set the feature vectors 
     pos_samples = read_sample_from_file(open(sys.argv[1]),10000)
-    neg_samples = read_sample_from_file(open(sys.argv[2]),20000)
+    neg_samples = read_sample_from_file(open(sys.argv[2]),100000)
     print "%d positive samples found!" % len(pos_samples)
     print "%d negetive samples found!" % len(neg_samples)
     samples=pos_samples+neg_samples
@@ -281,9 +326,9 @@ def main():
     labels=np.append(pos_labels,neg_labels)
    # print np.where(labels==1)[0] 
     y=labels 
-   # PU_estimater(X,y)
+    PU_estimater(X,y)
     #Clustering_map(X,y)
-    OneClass_estimator(X,y)    
+   # OneClass_estimator(X,y)    
 
 main()
 
